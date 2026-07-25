@@ -3,12 +3,10 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule } from '@nestjs/config';
-import {
-  GenesysConversation,
-  GenesysRecording,
-  GenesysConversationUser,
-  GenesysConversationWrapupCode,
-} from './audio/entities/genesys-audio.entity';
+import { Gravacao } from './audio/entities/gravacao.entity';
+import { Usuario } from './audio/entities/usuario.entity';
+import { Permissao } from './audio/entities/permissao.entity';
+import { LogAuditoria } from './audio/entities/log-auditoria.entity';
 import { AudioModule } from './audio/audio.module';
 import { AuthModule } from './user/auth.module';
 import { User } from './user/entities/user.entity';
@@ -34,10 +32,10 @@ import { Division } from './config/entities/division.entity';
       User,
       Log,
       Division,
-      GenesysConversation,
-      GenesysRecording,
-      GenesysConversationUser,
-      GenesysConversationWrapupCode,
+      Gravacao,
+      Usuario,
+      Permissao,
+      LogAuditoria,
     ],
     synchronize: false,
     logging: process.env.NODE_ENV === 'development',

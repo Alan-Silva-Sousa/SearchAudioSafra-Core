@@ -1,272 +1,221 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import {
-  GenesysConversation,
-  GenesysRecording,
-  GenesysConversationUser,
-  GenesysConversationWrapupCode,
-} from './entities/genesys-audio.entity';
-import { FilesystemService } from '../filesystem.service';
-import { GenesysService } from '../genesys/genesys.service';
+import { Gravacao } from './entities/gravacao.entity';
 import * as archiver from 'archiver';
 import { Response } from 'express';
-import { readFileSync } from 'fs';
+import * as fs from 'fs';
+
+// Campos mock/teste local que o front espera mas não existem no modelo
+// canônico da especificação NICE (CPF, CNPJ, dados bancários, etc).
+// Como não há coluna própria pra isso na tabela gravacoes, ficam fixos
+// como mock até existir uma fonte real desses dados.
+const MOCK_EXTRA_FIELDS = {
+  CPF: null,
+  CNPJ: null,
+  AGENCIA: null,
+  CONTA: null,
+  EC: null,
+  CONTRATO: null,
+  PROTOCOLO: null,
+};
 
 @Injectable()
 export class AudioService {
-  private readonly encryptionKey: string;
-
   constructor(
-    @InjectRepository(GenesysConversation)
-    private readonly conversationRepository: Repository<GenesysConversation>,
-    @InjectRepository(GenesysRecording)
-    private readonly recordingRepository: Repository<GenesysRecording>,
-    @InjectRepository(GenesysConversationUser)
-    private readonly conversationUserRepository: Repository<GenesysConversationUser>,
-    @InjectRepository(GenesysConversationWrapupCode)
-    private readonly wrapupCodeRepository: Repository<GenesysConversationWrapupCode>,
-    @Inject(FilesystemService)
-    private readonly filesystemService: FilesystemService,
-    private readonly genesysService: GenesysService
-  ) {
-    // Load encryption key for decrypt_value() SQL function
-    const keyPath = process.env.RECORDINGS_KEY_FILE || '/run/secrets/recordings.key';
-    try {
-      this.encryptionKey = readFileSync(keyPath, 'utf8').trim();
-      console.log(`[AudioService] Encryption key loaded from: ${keyPath}`);
-    } catch (error) {
-      console.error(`[AudioService] WARNING: Could not load encryption key from ${keyPath}`);
-      this.encryptionKey = '';
-    }
+    @InjectRepository(Gravacao)
+    private readonly gravacaoRepository: Repository<Gravacao>,
+  ) {}
+
+  /**
+   * Mapeia uma entidade Gravacao para o formato que o front espera
+   * (RecordingMeta em useRecordings.ts)
+   */
+  private mapToRecordingMeta(g: Gravacao) {
+    const recordStart =
+      g.dataGravacao && g.horaInicio
+        ? `${g.dataGravacao}T${g.horaInicio}`
+        : null;
+
+    return {
+      CallIDMaster: g.id,
+      IdOrigem: g.idOrigem,
+      ANI: g.origem,
+      DNIS: g.destino,
+      RecordStart: recordStart,
+      RecordDuration: g.duracaoSegundos ?? 0,
+      CampaignId: g.sistemaOrigem,
+      Campaignname: g.sistemaOrigem,
+      DestinationFileSize: null,
+      S3Directory: null,
+      S3FileName: g.referenciaAudio,
+      DestinationFileName: g.referenciaAudio,
+      AgentId: g.agente,
+      Username: g.agente,
+      AgentLogin: g.agente,
+      Disposition: null,
+      Dispositionname: null,
+      Direction: null,
+      MediaType: 'audio',
+      ContentType: 'audio/mpeg',
+      ...MOCK_EXTRA_FIELDS,
+    };
   }
 
   /**
-   * Build the base query for Genesys data with all necessary joins and field mappings
+   * Busca os bytes do áudio a partir do "endereço" salvo em
+   * referencia_audio. Hoje é um caminho de arquivo local (fs.readFile);
+   * quando migrar para S3, essa é a ÚNICA função que precisa mudar —
+   * troca-se a leitura local por uma chamada ao SDK do S3
+   * (ex: GetObjectCommand), mantendo a mesma assinatura de retorno
+   * (Buffer). Nenhum outro lugar do sistema precisa ser alterado.
    */
-  private buildGenesysQuery() {
-    return this.conversationRepository
-      .createQueryBuilder('c')
-      .leftJoin(GenesysRecording, 'r', 'c.conversation_id = r.conversation_id AND r.file_path IS NOT NULL')
-      .leftJoin(
-        subQuery => subQuery
-          .select('cu.conversation_id', 'conv_id')
-          .addSelect('cu.user_id', 'user_id')
-          .from(GenesysConversationUser, 'cu')
-          .distinctOn(['cu.conversation_id']),
-        'agent',
-        'c.conversation_id = agent.conv_id'
-      )
-      .leftJoin(
-        subQuery => subQuery
-          .select('cw.conversation_id', 'conv_id')
-          .addSelect('cw.wrapup_code', 'wrapup_code')
-          .from(GenesysConversationWrapupCode, 'cw')
-          .distinctOn(['cw.conversation_id']),
-        'wrapup',
-        'c.conversation_id = wrapup.conv_id'
-      )
-      .select([
-        'c.conversation_id as "CallIDMaster"',
-        `genesys.decrypt_value(c.ani_displayable, :encryptionKey) as "ANI"`,
-        `genesys.decrypt_value(c.dnis_displayable, :encryptionKey) as "DNIS"`,
-        'c.conversation_start_time as "RecordStart"',
-        'COALESCE(c.duration_ms / 1000, 0) as "RecordDuration"',
-        'c.division_id as "CampaignId"',
-        'c.division_name as "Campaignname"',
-        'r.file_size as "DestinationFileSize"',
-        `regexp_replace(genesys.decrypt_value(r.file_path, :encryptionKey), '/[^/]+$', '') as "S3Directory"`,
-        `regexp_replace(genesys.decrypt_value(r.file_path, :encryptionKey), '.*/([^/]+)$', '\\1') as "S3FileName"`,
-        `regexp_replace(genesys.decrypt_value(r.file_path, :encryptionKey), '.*/([^/]+)$', '\\1') as "DestinationFileName"`,
-        'agent.user_id as "AgentId"',
-        'agent.user_id as "Username"',
-        'wrapup.wrapup_code as "Disposition"',
-        'wrapup.wrapup_code as "Dispositionname"',
-        'c.initial_direction as "Direction"',
-        'c.media_type as "MediaType"',
-        'r.content_type as "ContentType"',
-      ])
-      .setParameter('encryptionKey', this.encryptionKey);
+  private async getAudioBuffer(referenciaAudio: string): Promise<Buffer> {
+    return fs.promises.readFile(referenciaAudio);
   }
 
   async findAll(filterTypes: string[], filterValues: string[]) {
-    let query = this.buildGenesysQuery();
-
-    const ranges: Record<string, { start?: string; end?: string }> = {};
+    let query = this.gravacaoRepository.createQueryBuilder('g');
 
     filterTypes.forEach((type, index) => {
       if (!type) return;
       const value = filterValues[index];
-
-      // Check if it's a range filter (ends with Start or End)
-      const startMatch = type.match(/^(.+)StartStart$/);
-      const endMatch = type.match(/^(.+)StartEnd$/);
-
-      if (startMatch) {
-        const field = startMatch[1] + 'Start';
-        ranges[field] ??= {};
-        ranges[field].start = value;
-        return;
-      }
-
-      if (endMatch) {
-        const field = endMatch[1] + 'Start';
-        ranges[field] ??= {};
-        ranges[field].end = value;
-        return;
-      }
+      if (!value) return;
 
       if (type === 'RecordStart') {
-        const startOfDay = `${value} 00:00:00.000`;
-        const endOfDay = `${value} 23:59:59.999`;
-        query = query.andWhere(`c.conversation_start_time BETWEEN :start${index} AND :end${index}`, {
-          [`start${index}`]: startOfDay,
-          [`end${index}`]: endOfDay,
+        query = query.andWhere('g.data_gravacao = :date' + index, {
+          ['date' + index]: value,
         });
-      } else if (type === 'RecordStartHour') {
-        const startHour = value;
-        const endHour = `${startHour.split(':')[0]}:59`;
-        query = query.andWhere(
-          `TO_CHAR(c.conversation_start_time, 'HH24:MI') BETWEEN :startHour${index} AND :endHour${index}`,
-          {
-            [`startHour${index}`]: startHour,
-            [`endHour${index}`]: endHour,
-          }
-        );
       } else if (type === 'ANI') {
-        // Search in both ANI and DNIS (decrypted)
         query = query.andWhere(
-          `(genesys.decrypt_value(c.ani_displayable, :encryptionKey) LIKE :phone${index} OR genesys.decrypt_value(c.dnis_displayable, :encryptionKey) LIKE :phone${index})`,
-          { [`phone${index}`]: `%${value}%` }
+          '(g.origem LIKE :phone' + index + ' OR g.destino LIKE :phone' + index + ')',
+          { ['phone' + index]: `%${value}%` },
         );
       } else if (type === 'Agent') {
-        query = query.andWhere(`agent.user_id = :agentId${index}`, {
-          [`agentId${index}`]: value,
+        query = query.andWhere('g.agente = :agent' + index, {
+          ['agent' + index]: value,
         });
       } else if (type === 'Campaign') {
-        query = query.andWhere(`c.division_id = :campaignId${index}`, {
-          [`campaignId${index}`]: value,
-        });
-      } else if (type === 'Disposition') {
-        query = query.andWhere(`wrapup.wrapup_code = :dispositionId${index}`, {
-          [`dispositionId${index}`]: value,
-        });
-      } else if (type === 'Direction') {
-        query = query.andWhere(`c.initial_direction = :direction${index}`, {
-          [`direction${index}`]: value,
+        query = query.andWhere('g.sistema_origem = :sistema' + index, {
+          ['sistema' + index]: value,
         });
       }
     });
 
-    // Handle date ranges
-    let rangeIdx = 0;
-    Object.entries(ranges).forEach(([field, { start, end }]) => {
-      // Map RecordStart to conversation_start_time
-      const dbField = field === 'RecordStart' ? 'c.conversation_start_time' : `c.${field}`;
+    query = query.orderBy('g.data_gravacao', 'DESC').addOrderBy('g.hora_inicio', 'DESC');
 
-      if (start && end) {
-        const startTs = `${start} 00:00:00.000`;
-        const endTs = `${end} 23:59:59.999`;
-        query = query.andWhere(`${dbField} BETWEEN :rStart${rangeIdx} AND :rEnd${rangeIdx}`, {
-          [`rStart${rangeIdx}`]: startTs,
-          [`rEnd${rangeIdx}`]: endTs,
-        });
-      } else if (start) {
-        const startTs = `${start} 00:00:00.000`;
-        query = query.andWhere(`${dbField} >= :rStart${rangeIdx}`, {
-          [`rStart${rangeIdx}`]: startTs,
-        });
-      } else if (end) {
-        const endTs = `${end} 23:59:59.999`;
-        query = query.andWhere(`${dbField} <= :rEnd${rangeIdx}`, {
-          [`rEnd${rangeIdx}`]: endTs,
-        });
-      }
-      rangeIdx++;
-    });
-
-    query = query.orderBy('c.conversation_start_time', 'DESC');
-
-    let data;
+    let data: Gravacao[] = [];
     try {
-      data = await query.limit(500).getRawMany();
+      data = await query.limit(500).getMany();
     } catch (error) {
-      console.error('[AudioService] Error querying Genesys data:', error.message);
+      console.error('[AudioService] Erro ao consultar gravacoes:', error.message);
       data = [];
     }
 
-    // Enriquecer com nomes de usuários da API do Genesys
-    if (data.length > 0) {
-      data = await this.genesysService.enrichWithUserNames(data);
-    }
-
-    return data;
+    return data.map((g) => this.mapToRecordingMeta(g));
   }
 
-  async findOne(id: string, date: string) {
-    let query = this.buildGenesysQuery();
+  async findOne(id: string) {
+    const gravacao = await this.gravacaoRepository.findOne({ where: { id } });
 
-    query = query.andWhere('c.conversation_id = :id', { id });
-
-    const data = await query.getRawOne();
-
-    if (!data) {
-      return;
+    if (!gravacao) {
+      return null;
     }
 
-    // Check if file exists in filesystem
-    const fileExists = data.S3Directory && data.S3FileName
-      ? this.filesystemService.fileExists(data.S3Directory, data.S3FileName)
+    const fileExists = gravacao.referenciaAudio
+      ? fs.existsSync(gravacao.referenciaAudio)
       : false;
 
     return {
-      ...data,
+      ...this.mapToRecordingMeta(gravacao),
       fileExists,
-      filePath: data.S3Directory && data.S3FileName
-        ? `${data.S3Directory}/${data.S3FileName}`
-        : null,
+      filePath: gravacao.referenciaAudio,
     };
   }
 
-  async findSome(ids: string[], date: string) {
-    let query = this.buildGenesysQuery();
+  async findSome(ids: string[]) {
+    const data = await this.gravacaoRepository
+      .createQueryBuilder('g')
+      .where('g.id IN (:...ids)', { ids })
+      .getMany();
 
-    query = query.andWhere('c.conversation_id IN (:...ids)', { ids });
-
-    const data = await query.getRawMany();
-
-    if (!data) {
-      return;
-    }
-
-    return data;
+    return data.map((g) => this.mapToRecordingMeta(g));
   }
 
-  async streamZipFromFilesystem(ids: string[], res: Response, date: string) {
+  /**
+   * Retorna os bytes do áudio de uma gravação específica, para a rota
+   * de streaming/play (GET /api/audio/play/:id) e para o download
+   * individual. O content-type e a extensão do arquivo são detectados
+   * a partir do próprio arquivo em referencia_audio.
+   */
+  async getAudioFile(id: string): Promise<{ buffer: Buffer; contentType: string; fileName: string } | null> {
+    const gravacao = await this.gravacaoRepository.findOne({ where: { id } });
+
+    if (!gravacao || !gravacao.referenciaAudio) {
+      return null;
+    }
+
+    try {
+      const buffer = await this.getAudioBuffer(gravacao.referenciaAudio);
+      const extension = gravacao.referenciaAudio.split('.').pop()?.toLowerCase() || 'mp3';
+      const contentType = this.getContentTypeForExtension(extension);
+      const fileName = `${gravacao.idOrigem || gravacao.id}.${extension}`;
+
+      return {
+        buffer,
+        contentType,
+        fileName,
+      };
+    } catch (err) {
+      console.error(`[AudioService] Erro ao ler áudio da gravação ${id}:`, err.message);
+      return null;
+    }
+  }
+
+  /**
+   * Mapeia extensão de arquivo para o content-type correto.
+   */
+  private getContentTypeForExtension(extension: string): string {
+    const map: Record<string, string> = {
+      mp3: 'audio/mpeg',
+      wav: 'audio/wav',
+      m4a: 'audio/mp4',
+      ogg: 'audio/ogg',
+      flac: 'audio/flac',
+    };
+
+    return map[extension] || 'audio/mpeg';
+  }
+
+  /**
+   * Gera um ZIP com os áudios das gravações selecionadas, lendo cada
+   * arquivo a partir de referencia_audio (hoje um caminho local; no
+   * futuro, um objeto no S3 — só getAudioBuffer muda). Cada entrada no
+   * ZIP é nomeada com o id_origem da gravação (ex: CALL-014.mp3).
+   */
+  async streamZipFromFilesystem(ids: string[], res: Response) {
     const archive = archiver('zip', { zlib: { level: 9 } });
     archive.pipe(res);
 
-    for (const id of ids) {
-      try {
-        const audio = await this.findOne(id, date);
+    const gravacoes = await this.gravacaoRepository
+      .createQueryBuilder('g')
+      .where('g.id IN (:...ids)', { ids })
+      .getMany();
 
-        if (!audio || !audio.fileExists) {
-          console.log(`Arquivo não encontrado para áudio ${id}, pulando...`);
+    for (const gravacao of gravacoes) {
+      try {
+        if (!gravacao.referenciaAudio) {
+          console.log(`[AudioService] Gravação ${gravacao.id} sem referencia_audio, pulando.`);
           continue;
         }
 
-        // Create stream from local file
-        const { stream: fileStream } = this.filesystemService.getStream(
-          audio.S3Directory,
-          audio.S3FileName
-        );
+        const buffer = await this.getAudioBuffer(gravacao.referenciaAudio);
+        const extension = gravacao.referenciaAudio.split('.').pop()?.toLowerCase() || 'mp3';
+        const fileName = `${gravacao.idOrigem || gravacao.id}.${extension}`;
 
-        // Add to ZIP with appropriate name
-        archive.append(fileStream, {
-          name: audio.DestinationFileName || audio.S3FileName,
-        });
+        archive.append(buffer, { name: fileName });
       } catch (err) {
-        console.error(`Erro ao adicionar o áudio ${id}:`, err.message);
+        console.error(`[AudioService] Erro ao ler áudio da gravação ${gravacao.id}:`, err.message);
       }
     }
 
