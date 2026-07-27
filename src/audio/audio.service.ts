@@ -2,9 +2,12 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Gravacao } from './entities/gravacao.entity';
-import * as archiver from 'archiver';
 import { Response } from 'express';
 import * as fs from 'fs';
+import { parseFile } from 'music-metadata';
+
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const archiver = require('archiver');
 
 // Campos mock/teste local que o front espera mas não existem no modelo
 // canônico da especificação NICE (CPF, CNPJ, dados bancários, etc).
@@ -20,6 +23,16 @@ const MOCK_EXTRA_FIELDS = {
   PROTOCOLO: null,
 };
 
+/**
+ * Extrai uma mensagem de erro segura a partir de um valor `unknown`
+ * (tipo padrão de catch no TS moderno), evitando acesso direto a
+ * `.message` em um valor não tipado.
+ */
+function getErrorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  return String(err);
+}
+
 @Injectable()
 export class AudioService {
   constructor(
@@ -28,14 +41,40 @@ export class AudioService {
   ) {}
 
   /**
-   * Mapeia uma entidade Gravacao para o formato que o front espera
-   * (RecordingMeta em useRecordings.ts)
+   * Calcula a duração real (em segundos) de um arquivo de áudio, lendo
+   * seus metadados diretamente do arquivo em referencia_audio. Retorna
+   * null se o arquivo não existir ou não for legível.
    */
-  private mapToRecordingMeta(g: Gravacao) {
+  private async calcularDuracaoPorId(referenciaAudio: string): Promise<number | null> {
+    try {
+      const metadata = await parseFile(referenciaAudio);
+      const duration = metadata.format.duration;
+      return duration ? Math.floor(duration) : null;
+    } catch (err) {
+      console.error(`[AudioService] Erro ao calcular duração de ${referenciaAudio}:`, getErrorMessage(err));
+      return null;
+    }
+  }
+
+  /**
+   * Mapeia uma entidade Gravacao para o formato que o front espera
+   * (RecordingMeta em useRecordings.ts). RecordDuration agora reflete a
+   * duração REAL do arquivo (lida via music-metadata), com fallback
+   * para o valor digitado manualmente em duracao_segundos caso o
+   * arquivo não possa ser lido.
+   */
+  private async mapToRecordingMeta(g: Gravacao) {
     const recordStart =
       g.dataGravacao && g.horaInicio
         ? `${g.dataGravacao}T${g.horaInicio}`
         : null;
+
+    const duracaoReal = g.referenciaAudio
+      ? await this.calcularDuracaoPorId(g.referenciaAudio)
+      : null;
+
+    const extension = g.referenciaAudio?.split('.').pop()?.toLowerCase();
+    const contentType = extension ? this.getContentTypeForExtension(extension) : 'audio/mpeg';
 
     return {
       CallIDMaster: g.id,
@@ -43,7 +82,7 @@ export class AudioService {
       ANI: g.origem,
       DNIS: g.destino,
       RecordStart: recordStart,
-      RecordDuration: g.duracaoSegundos ?? 0,
+      RecordDuration: duracaoReal ?? g.duracaoSegundos ?? 0,
       CampaignId: g.sistemaOrigem,
       Campaignname: g.sistemaOrigem,
       DestinationFileSize: null,
@@ -57,7 +96,8 @@ export class AudioService {
       Dispositionname: null,
       Direction: null,
       MediaType: 'audio',
-      ContentType: 'audio/mpeg',
+      ContentType: contentType,
+      FileExtension: extension ?? null,
       ...MOCK_EXTRA_FIELDS,
     };
   }
@@ -108,11 +148,11 @@ export class AudioService {
     try {
       data = await query.limit(500).getMany();
     } catch (error) {
-      console.error('[AudioService] Erro ao consultar gravacoes:', error.message);
+      console.error('[AudioService] Erro ao consultar gravacoes:', getErrorMessage(error));
       data = [];
     }
 
-    return data.map((g) => this.mapToRecordingMeta(g));
+    return Promise.all(data.map((g) => this.mapToRecordingMeta(g)));
   }
 
   async findOne(id: string) {
@@ -127,7 +167,7 @@ export class AudioService {
       : false;
 
     return {
-      ...this.mapToRecordingMeta(gravacao),
+      ...(await this.mapToRecordingMeta(gravacao)),
       fileExists,
       filePath: gravacao.referenciaAudio,
     };
@@ -139,7 +179,7 @@ export class AudioService {
       .where('g.id IN (:...ids)', { ids })
       .getMany();
 
-    return data.map((g) => this.mapToRecordingMeta(g));
+    return Promise.all(data.map((g) => this.mapToRecordingMeta(g)));
   }
 
   /**
@@ -167,7 +207,7 @@ export class AudioService {
         fileName,
       };
     } catch (err) {
-      console.error(`[AudioService] Erro ao ler áudio da gravação ${id}:`, err.message);
+      console.error(`[AudioService] Erro ao ler áudio da gravação ${id}:`, getErrorMessage(err));
       return null;
     }
   }
@@ -215,7 +255,7 @@ export class AudioService {
 
         archive.append(buffer, { name: fileName });
       } catch (err) {
-        console.error(`[AudioService] Erro ao ler áudio da gravação ${gravacao.id}:`, err.message);
+        console.error(`[AudioService] Erro ao ler áudio da gravação ${gravacao.id}:`, getErrorMessage(err));
       }
     }
 
