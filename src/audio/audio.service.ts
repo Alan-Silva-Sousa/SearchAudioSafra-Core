@@ -4,15 +4,22 @@ import { Repository } from 'typeorm';
 import { Gravacao } from './entities/gravacao.entity';
 import { Response } from 'express';
 import * as fs from 'fs';
-import { parseFile } from 'music-metadata';
+import { parseFile, parseBuffer } from 'music-metadata';
+import { S3Client, GetObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
+import { Readable } from 'stream';
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
 const archiver = require('archiver');
 
-// Campos mock/teste local que o front espera mas não existem no modelo
-// canônico da especificação NICE (CPF, CNPJ, dados bancários, etc).
-// Como não há coluna própria pra isso na tabela gravacoes, ficam fixos
-// como mock até existir uma fonte real desses dados.
+const s3Client = new S3Client({
+  region: process.env.AWS_REGION || 'us-east-1',
+});
+
+const S3_BUCKET = process.env.AWS_S3_BUCKET || 'safra-search-audio-e-video';
+
+// regrinha pra rodar ou local ou no s3
+// colocar USE_S3=true no .env quando quiser testar/usar o S3.
+const USE_S3 = process.env.USE_S3 === 'true';
+
 const MOCK_EXTRA_FIELDS = {
   CPF: null,
   CNPJ: null,
@@ -23,11 +30,7 @@ const MOCK_EXTRA_FIELDS = {
   PROTOCOLO: null,
 };
 
-/**
- * Extrai uma mensagem de erro segura a partir de um valor `unknown`
- * (tipo padrão de catch no TS moderno), evitando acesso direto a
- * `.message` em um valor não tipado.
- */
+
 function getErrorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
@@ -40,13 +43,16 @@ export class AudioService {
     private readonly gravacaoRepository: Repository<Gravacao>,
   ) {}
 
-  /**
-   * Calcula a duração real (em segundos) de um arquivo de áudio, lendo
-   * seus metadados diretamente do arquivo em referencia_audio. Retorna
-   * null se o arquivo não existir ou não for legível.
-   */
+  //calcula a duração real de cada arquivo
   private async calcularDuracaoPorId(referenciaAudio: string): Promise<number | null> {
     try {
+      if (USE_S3) {
+        const buffer = await this.getAudioBufferFromS3(referenciaAudio);
+        const metadata = await parseBuffer(buffer);
+        const duration = metadata.format.duration;
+        return duration ? Math.floor(duration) : null;
+      }
+
       const metadata = await parseFile(referenciaAudio);
       const duration = metadata.format.duration;
       return duration ? Math.floor(duration) : null;
@@ -57,11 +63,9 @@ export class AudioService {
   }
 
   /**
-   * Mapeia uma entidade Gravacao para o formato que o front espera
-   * (RecordingMeta em useRecordings.ts). RecordDuration agora reflete a
-   * duração REAL do arquivo (lida via music-metadata), com fallback
-   * para o valor digitado manualmente em duracao_segundos caso o
-   * arquivo não possa ser lido.
+   * Converte uma Gravacao do banco para o formato RecordingMeta,
+   * que é o que o front (useRecordings.ts) espera pra montar a tabela.
+   * A duração vem do arquivo de áudio real (calculada com o import music-metadata);
    */
   private async mapToRecordingMeta(g: Gravacao) {
     const recordStart =
@@ -102,16 +106,54 @@ export class AudioService {
     };
   }
 
+  //verifica se o arquivo existe no s3 via HeadObjectCommand
+  private async checkFileExists(referenciaAudio: string): Promise<boolean> {
+    if (USE_S3) {
+      try {
+        await s3Client.send(new HeadObjectCommand({ Bucket: S3_BUCKET, Key: referenciaAudio }));
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    return fs.existsSync(referenciaAudio);
+  }
+
   /**
    * Busca os bytes do áudio a partir do "endereço" salvo em
-   * referencia_audio. Hoje é um caminho de arquivo local (fs.readFile);
-   * quando migrar para S3, essa é a ÚNICA função que precisa mudar —
-   * troca-se a leitura local por uma chamada ao SDK do S3
-   * (ex: GetObjectCommand), mantendo a mesma assinatura de retorno
-   * (Buffer). Nenhum outro lugar do sistema precisa ser alterado.
+   * referencia_audio. Controlado pelo toggle USE_S3:
+   * - USE_S3=false (padrão): lê do disco local (fs.readFile) — bom
+   *   para desenvolvimento sem depender da AWS.
+   * - USE_S3=true: busca no bucket S3 configurado, usando
+   *   referencia_audio como a KEY do objeto (ex: "CALL-014.mp3").
+   * Nenhum outro lugar do sistema precisa mudar quando alternar entre
+   * os dois modos — toda a decisão fica isolada aqui.
    */
   private async getAudioBuffer(referenciaAudio: string): Promise<Buffer> {
+    if (USE_S3) {
+      return this.getAudioBufferFromS3(referenciaAudio);
+    }
     return fs.promises.readFile(referenciaAudio);
+  }
+
+  /**
+   * Busca um objeto no S3 pela key e retorna como Buffer.
+   */
+  private async getAudioBufferFromS3(key: string): Promise<Buffer> {
+    const command = new GetObjectCommand({
+      Bucket: S3_BUCKET,
+      Key: key,
+    });
+
+    const response = await s3Client.send(command);
+    const stream = response.Body as Readable;
+
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+
+    return Buffer.concat(chunks);
   }
 
   async findAll(filterTypes: string[], filterValues: string[]) {
@@ -128,16 +170,16 @@ export class AudioService {
         });
       } else if (type === 'ANI') {
         query = query.andWhere(
-          '(g.origem LIKE :phone' + index + ' OR g.destino LIKE :phone' + index + ')',
+          '(g.origem ILIKE :phone' + index + ' OR g.destino ILIKE :phone' + index + ')',
           { ['phone' + index]: `%${value}%` },
         );
       } else if (type === 'Agent') {
-        query = query.andWhere('g.agente = :agent' + index, {
-          ['agent' + index]: value,
+        query = query.andWhere('g.agente ILIKE :agent' + index, {
+          ['agent' + index]: `%${value}%`,
         });
       } else if (type === 'Campaign') {
-        query = query.andWhere('g.sistema_origem = :sistema' + index, {
-          ['sistema' + index]: value,
+        query = query.andWhere('g.sistema_origem ILIKE :sistema' + index, {
+          ['sistema' + index]: `%${value}%`,
         });
       }
     });
@@ -163,7 +205,7 @@ export class AudioService {
     }
 
     const fileExists = gravacao.referenciaAudio
-      ? fs.existsSync(gravacao.referenciaAudio)
+      ? await this.checkFileExists(gravacao.referenciaAudio)
       : false;
 
     return {

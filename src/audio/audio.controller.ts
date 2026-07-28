@@ -1,5 +1,4 @@
 import { Controller, Get, Post, Body, Param, Query, Res, NotFoundException } from '@nestjs/common';
-// eslint-disable-next-line prettier/prettier
 import { AudioService } from './audio.service';
 import { Response } from 'express';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery, ApiParam } from '@nestjs/swagger';
