@@ -20,8 +20,8 @@ export class FilesystemService {
       this.decryptionKey = Buffer.from(keyHex, 'base64');
       console.log(`[FilesystemService] Chave de descriptografia carregada de: ${keyPath}`);
     } catch (error) {
-      console.error(`[FilesystemService] ERRO: Não foi possível carregar a chave de descriptografia de ${keyPath}`);
-      throw error;
+      console.error(`[FilesystemService] AVISO: Não foi possível carregar a chave de descriptografia de ${keyPath}. Streaming/download de áudio vai falhar até essa chave existir. [DEV: throw desabilitado temporariamente]`);
+      // throw error; // DEV: comentado temporariamente para rodar sem a chave (sem Ext-Gravacoes-Genesys ativo)
     }
   }
 
