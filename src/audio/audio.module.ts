@@ -4,6 +4,7 @@ import { AudioController } from './audio.controller';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Gravacao } from './entities/gravacao.entity';
 import { AuthModule } from '../user/auth.module';
+import { CanonicalAudioService } from './canonical-audio.service';
 
 @Module({
   imports: [
@@ -11,6 +12,6 @@ import { AuthModule } from '../user/auth.module';
     AuthModule,
   ],
   controllers: [AudioController],
-  providers: [AudioService],
+  providers: [AudioService, CanonicalAudioService],
 })
 export class AudioModule {}

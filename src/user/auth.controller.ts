@@ -1,5 +1,5 @@
-import { Controller, Post, Get, Body, Query, Res, UseGuards } from '@nestjs/common';
-import { Response } from 'express';
+import { Controller, Post, Get, Body, Query, Res, Req, UseGuards } from '@nestjs/common';
+import { Request, Response } from 'express';
 import { AuthService } from './auth.service';
 import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import { JwtAuthGuard } from './jwt-auth.guard';
@@ -21,7 +21,7 @@ export class AuthController {
     schema: {
       example: {
         authMethod: 'local',
-        genesysAuthUrl: 'https://login.mypurecloud.com.br/oauth/authorize?...'
+        genesysAuthUrl: 'https://login.sae1.pure.cloud/oauth/authorize?...'
       }
     }
   })
@@ -38,16 +38,48 @@ export class AuthController {
   @ApiQuery({ name: 'code', description: 'Authorization code do OAuth', required: true })
   @ApiResponse({ status: 302, description: 'Redireciona para o frontend com token' })
   @ApiResponse({ status: 401, description: 'Erro de autenticação' })
-  async genesysCallback(@Query('code') code: string, @Res() res: Response) {
+  async genesysCallback(@Query('code') code: string, @Query('state') state: string, @Res() res: Response) {
     try {
-      const result = await this.authService.handleGenesysCallback(code);
+      const result = await this.authService.handleGenesysCallback(code, state);
       const frontUrl = process.env.FRONT_URL || 'http://localhost:5173';
-      // Redirect to frontend with token in URL
-      res.redirect(`${frontUrl}/login?token=${result.token}&email=${encodeURIComponent(result.email)}`);
+      res.cookie('searchaudio_token', result.token, {
+        httpOnly: true,
+        secure: true,
+        sameSite: 'none',
+        path: '/',
+        maxAge: 24 * 60 * 60 * 1000,
+      });
+      res.redirect(`${frontUrl}/`);
     } catch (error) {
       const frontUrl = process.env.FRONT_URL || 'http://localhost:5173';
       res.redirect(`${frontUrl}/login?error=${encodeURIComponent(error.message || 'Erro de autenticação')}`);
     }
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get('auth/session')
+  getSession(
+    @Req() req: Request & { user?: Record<string, unknown> },
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const cookie = req.headers.cookie
+      ?.split(';')
+      .map((item) => item.trim())
+      .find((item) => item.startsWith('searchaudio_token='));
+    const token = cookie
+      ? decodeURIComponent(cookie.slice('searchaudio_token='.length))
+      : undefined;
+
+    if (token) {
+      res.cookie('searchaudio_token', token, {
+        httpOnly: true,
+        secure: true,
+        sameSite: 'none',
+        path: '/',
+        maxAge: 24 * 60 * 60 * 1000,
+      });
+    }
+    return { authenticated: true, user: req.user };
   }
 
   @ApiTags('Autenticação')

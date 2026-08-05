@@ -15,8 +15,12 @@ export class JwtAuthGuard implements CanActivate {
     if (authHeader) {
       const [, headerToken] = authHeader.split(' ');
       token = headerToken;
-    } else if (request.query?.token) {
-      token = request.query.token;
+    } else if (request.headers.cookie) {
+      const cookie = request.headers.cookie
+        .split(';')
+        .map((item: string) => item.trim())
+        .find((item: string) => item.startsWith('searchaudio_token='));
+      token = cookie ? decodeURIComponent(cookie.slice('searchaudio_token='.length)) : undefined;
     }
 
     if (!token) {

@@ -69,9 +69,9 @@ export class AudioService {
         ? `${g.dataGravacao}T${g.horaInicio}`
         : null;
 
-    const duracaoReal = g.referenciaAudio
+    const duracaoReal = g.duracaoSegundos ?? (g.referenciaAudio
       ? await this.calcularDuracaoPorId(g.referenciaAudio)
-      : null;
+      : null);
 
     const extension = g.referenciaAudio?.split('.').pop()?.toLowerCase();
     const contentType = extension ? this.getContentTypeForExtension(extension) : 'audio/mpeg';
@@ -82,7 +82,7 @@ export class AudioService {
       ANI: g.origem,
       DNIS: g.destino,
       RecordStart: recordStart,
-      RecordDuration: duracaoReal ?? g.duracaoSegundos ?? 0,
+      RecordDuration: duracaoReal ?? 0,
       CampaignId: g.sistemaOrigem,
       Campaignname: g.sistemaOrigem,
       DestinationFileSize: null,

@@ -70,7 +70,7 @@ export class AuthService {
   /**
    * Handle Genesys OAuth callback
    */
-  async handleGenesysCallback(code: string) {
+  async handleGenesysCallback(code: string, state: string) {
     const authMethod = this.strategyFactory.getAuthMethod();
 
     if (authMethod !== 'genesys') {
@@ -78,7 +78,7 @@ export class AuthService {
     }
 
     const strategy = this.strategyFactory.getGenesysStrategy();
-    const result = await strategy.authenticate({ code });
+    const result = await strategy.authenticate({ code, state });
 
     if (!result.success || !result.user) {
       throw new UnauthorizedException(result.error || 'Erro ao autenticar com Genesys');
@@ -90,6 +90,7 @@ export class AuthService {
       email: result.user.email,
       displayName: result.user.displayName,
       authProvider: result.user.authProvider,
+      genesysGroupIds: result.genesysGroupIds || [],
     };
 
     return {

@@ -6,11 +6,13 @@ export interface AuthCredentials {
   username?: string;  // For local (email) and AD (sAMAccountName)
   password?: string;  // For local and AD
   code?: string;      // OAuth authorization code for Genesys
+  state?: string;     // OAuth state used to recover the PKCE verifier
 }
 
 export interface AuthResult {
   success: boolean;
   user?: User;
+  genesysGroupIds?: string[];
   error?: string;
 }
 

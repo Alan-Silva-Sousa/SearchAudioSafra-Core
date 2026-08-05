@@ -1,14 +1,18 @@
-FROM node:20-alpine
+FROM node:22-alpine AS build
+
 WORKDIR /app
 COPY package*.json ./
-RUN npm install
+RUN npm ci
 COPY . .
-EXPOSE 3000
+RUN npm run build
 
-# Em modo desenvolvimento, usar start:dev (hot reload)
-# Em modo produção, fazer build e usar node dist/main
-CMD if [ "$NODE_ENV" = "production" ]; then \
-      npm run build && node dist/main; \
-    else \
-      npm run start:dev; \
-    fi
+FROM node:22-alpine AS runtime
+
+WORKDIR /app
+ENV NODE_ENV=production
+COPY package*.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+COPY --from=build /app/dist ./dist
+USER node
+EXPOSE 3000
+CMD ["node", "dist/main"]

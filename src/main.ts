@@ -5,7 +5,12 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.setGlobalPrefix('api');
-  app.enableCors();
+  const frontUrl = process.env.FRONT_URL;
+  const frontOrigin = frontUrl ? new URL(frontUrl).origin : undefined;
+  app.enableCors({
+    origin: frontOrigin ? [frontOrigin] : false,
+    credentials: true,
+  });
 
   // Configuração do Swagger
   const config = new DocumentBuilder()

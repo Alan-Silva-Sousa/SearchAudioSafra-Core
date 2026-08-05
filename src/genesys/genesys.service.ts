@@ -30,8 +30,8 @@ export class GenesysService implements OnModuleInit {
 
   private async authenticate(): Promise<boolean> {
     try {
-      const clientId = process.env.GENESYS_CLIENT_ID;
-      const clientSecret = process.env.GENESYS_CLIENT_SECRET;
+      const clientId = process.env.GENESYS_SERVICE_CLIENT_ID;
+      const clientSecret = process.env.GENESYS_SERVICE_CLIENT_SECRET;
 
       if (!clientId || !clientSecret) {
         console.warn('[GenesysService] Credenciais do Genesys não configuradas');
