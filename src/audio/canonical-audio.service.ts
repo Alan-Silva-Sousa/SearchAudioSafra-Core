@@ -58,10 +58,10 @@ export class CanonicalAudioService implements OnModuleDestroy {
         FROM searchaudio_recordings p
         WHERE EXISTS (
           SELECT 1
-          FROM access_groups ag
-          JOIN access_group_divisions agd ON agd.access_group_id = ag.id
-          WHERE ag.active
-            AND agd.division_id = p.division_id
+          FROM conversation_queues cq
+          JOIN access_group_queues agq ON agq.queue_id = cq.queue_id
+          JOIN access_groups ag ON ag.id = agq.access_group_id AND ag.active
+          WHERE cq.conversation_id = p.conversation_id
             AND ag.genesys_group_id = ANY($1::varchar[])
             AND ag.slug = $2
         ) ${extraWhere}`,
