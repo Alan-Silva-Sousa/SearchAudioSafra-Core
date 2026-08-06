@@ -116,6 +116,19 @@ export class CanonicalAudioService implements OnModuleDestroy {
     return result.rows[0] ? this.toApi(result.rows[0]) : null;
   }
 
+  async findSome(groupIds: string[], accessContext: string, recordingIds: string[]) {
+    if (!recordingIds.length) return [];
+    const query = this.projection(
+      groupIds,
+      accessContext,
+      'AND p.recording_id = ANY($4::varchar[])',
+      [recordingIds],
+    );
+    if (!query.text) return [];
+    const result = await this.pool.query<CanonicalRow>(query.text, query.values);
+    return result.rows.map((row) => this.toApi(row));
+  }
+
   async getAudioFile(groupIds: string[], accessContext: string, recordingId: string) {
     const query = this.projection(groupIds, accessContext, 'AND p.recording_id = $4 LIMIT 1', [recordingId]);
     if (!query.text) return null;
@@ -128,6 +141,22 @@ export class CanonicalAudioService implements OnModuleDestroy {
     return {
       buffer: Buffer.concat(chunks),
       contentType: row.content_type || response.ContentType || 'application/octet-stream',
+      fileName: row.s3_object_key.split('/').pop() || `${recordingId}.bin`,
+    };
+  }
+
+  async getAudioStream(groupIds: string[], accessContext: string, recordingId: string) {
+    const query = this.projection(groupIds, accessContext, 'AND p.recording_id = $4 LIMIT 1', [recordingId]);
+    if (!query.text) return null;
+    const result = await this.pool.query<CanonicalRow>(query.text, query.values);
+    const row = result.rows[0];
+    if (!row) return null;
+
+    const response = await this.s3.send(
+      new GetObjectCommand({ Bucket: row.s3_bucket, Key: row.s3_object_key }),
+    );
+    return {
+      stream: response.Body as Readable,
       fileName: row.s3_object_key.split('/').pop() || `${recordingId}.bin`,
     };
   }

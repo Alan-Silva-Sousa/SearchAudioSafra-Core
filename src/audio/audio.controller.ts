@@ -1,5 +1,6 @@
-import { Controller, Get, Post, Body, Param, Query, Res, Req, NotFoundException, UseGuards, ForbiddenException } from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, Query, Res, Req, NotFoundException, UseGuards, ForbiddenException, BadRequestException, HttpCode } from '@nestjs/common';
 import { Request, Response } from 'express';
+import * as archiver from 'archiver';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery, ApiParam } from '@nestjs/swagger';
 import { CanonicalAudioService } from './canonical-audio.service';
 import { JwtAuthGuard } from '../user/jwt-auth.guard';
@@ -22,8 +23,8 @@ export class AudioController {
     return groups;
   }
 
-  private accessContext(req: AuthenticatedRequest): string {
-    const value = req.header('x-access-group')?.trim().toLowerCase() || '';
+  private accessContext(req: AuthenticatedRequest, queryValue = ''): string {
+    const value = req.header('x-access-group')?.trim().toLowerCase() || queryValue.trim().toLowerCase();
     if (!/^[a-z0-9-]{1,100}$/.test(value)) {
       throw new ForbiddenException('Contexto de acesso obrigatório');
     }
@@ -97,12 +98,69 @@ export class AudioController {
   }
 
   @Post('zip')
+  @HttpCode(200)
   @ApiOperation({ summary: 'Download múltiplos áudios em ZIP', description: 'Baixa múltiplas gravações em um arquivo ZIP [DEV: sem autenticação temporariamente]' })
   @ApiResponse({ status: 200, description: 'Arquivo ZIP com áudios', content: { 'application/zip': {} } })
-  async downloadZip(@Body('ids') _ids: string[], @Req() req: AuthenticatedRequest) {
-    this.groups(req);
-    this.accessContext(req);
-    throw new ForbiddenException('Download em lote será habilitado após auditoria');
+  async downloadZip(
+    @Body('ids') ids: string[],
+    @Req() req: AuthenticatedRequest,
+    @Res() res: Response,
+  ) {
+    return this.streamZip(ids, req, res);
+  }
+
+  @Get('zip/download')
+  async downloadZipByGet(
+    @Query('id') id: string | string[] = [],
+    @Query('accessGroup') accessGroup: string = '',
+    @Req() req: AuthenticatedRequest,
+    @Res() res: Response,
+  ) {
+    return this.streamZip(Array.isArray(id) ? id : [id], req, res, accessGroup);
+  }
+
+  private async streamZip(
+    ids: string[],
+    req: AuthenticatedRequest,
+    res: Response,
+    accessGroup = '',
+  ) {
+    const uniqueIds = [...new Set(
+      (Array.isArray(ids) ? ids : []).filter(
+        (id): id is string => typeof id === 'string' && id.trim().length > 0,
+      ),
+    )];
+    if (!uniqueIds.length) {
+      throw new BadRequestException('Nenhum áudio foi selecionado');
+    }
+    if (uniqueIds.length > 50) {
+      throw new BadRequestException('Selecione no máximo 50 áudios por ZIP');
+    }
+
+    const groups = this.groups(req);
+    const context = this.accessContext(req, accessGroup);
+    const authorized = await this.audioService.findSome(groups, context, uniqueIds);
+    if (!authorized.length) {
+      throw new NotFoundException('Nenhum áudio autorizado foi encontrado');
+    }
+
+    res.set({
+      'Content-Type': 'application/zip',
+      'Content-Disposition': 'attachment; filename="audios.zip"',
+    });
+    const archive = archiver('zip', { zlib: { level: 6 } });
+    archive.on('error', (error) => res.destroy(error));
+    archive.pipe(res);
+
+    for (const [index, audio] of authorized.entries()) {
+      const object = await this.audioService.getAudioStream(groups, context, audio.CallIDMaster);
+      if (!object) continue;
+      archive.append(object.stream, {
+        name: `${String(index + 1).padStart(2, '0')}-${object.fileName}`,
+      });
+    }
+
+    await archive.finalize();
   }
 
   @Post('csv')
