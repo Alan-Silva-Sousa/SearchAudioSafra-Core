@@ -4,6 +4,7 @@ import * as archiver from 'archiver';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery, ApiParam } from '@nestjs/swagger';
 import { CanonicalAudioService } from './canonical-audio.service';
 import { JwtAuthGuard } from '../user/jwt-auth.guard';
+import { AccessGroupService } from '../access/access-group.service';
 
 interface AuthenticatedRequest extends Request {
   user: { genesysGroupIds?: string[] };
@@ -15,6 +16,7 @@ interface AuthenticatedRequest extends Request {
 export class AudioController {
   constructor(
     private readonly audioService: CanonicalAudioService,
+    private readonly accessGroups: AccessGroupService,
   ) { }
 
   private groups(req: AuthenticatedRequest): string[] {
@@ -31,20 +33,38 @@ export class AudioController {
     return value;
   }
 
+  private async authorize(req: AuthenticatedRequest, queryValue = '') {
+    const groups = this.groups(req);
+    const context = this.accessContext(req, queryValue);
+    await this.accessGroups.assertAuthorized(groups, context);
+    return { groups, context };
+  }
+
   @Get()
   @ApiOperation({ summary: 'Listar áudios com filtros', description: 'Retorna lista de gravações com filtros opcionais. Máximo 500 registros. [DEV: sem autenticação temporariamente]' })
   @ApiQuery({ name: 'filterType', required: false, description: 'Tipo de filtro (RecordStart, ANI, Agent, Campaign)', example: 'RecordStart' })
   @ApiQuery({ name: 'filterValue', required: false, description: 'Valor do filtro', example: '2026-07-24' })
   @ApiResponse({ status: 200, description: 'Lista de gravações retornada com sucesso' })
-  findAll(
+  async findAll(
     @Req() req: AuthenticatedRequest,
     @Query('filterType') filterType: string | string[] = '',
     @Query('filterValue') filterValue: string | string[] = '',
+    @Query('filterField') filterField: string | string[] = '',
   ) {
+    const { groups, context } = await this.authorize(req);
     const types = Array.isArray(filterType) ? filterType : [filterType];
     const values = Array.isArray(filterValue) ? filterValue : [filterValue];
+    const fields = Array.isArray(filterField) ? filterField : [filterField];
 
-    return this.audioService.findAll(this.groups(req), this.accessContext(req), types, values);
+    return this.audioService.findAll(groups, context, types, values, fields);
+  }
+
+  @Get('filter-fields')
+  @ApiOperation({ summary: 'Listar campos de participant data para filtros' })
+  @ApiResponse({ status: 200, description: 'Nomes de campos disponíveis' })
+  async listFilterFields(@Req() req: AuthenticatedRequest) {
+    const { groups, context } = await this.authorize(req);
+    return this.audioService.filterFields(groups, context);
   }
 
   @Get('play/:id')
@@ -53,7 +73,8 @@ export class AudioController {
   @ApiResponse({ status: 200, description: 'Stream do arquivo de áudio', content: { 'audio/mpeg': {} } })
   @ApiResponse({ status: 404, description: 'Áudio não encontrado' })
   async playAudio(@Param('id') id: string, @Req() req: AuthenticatedRequest, @Res() res: Response) {
-    const audio = await this.audioService.getAudioFile(this.groups(req), this.accessContext(req), id);
+    const { groups, context } = await this.authorize(req);
+    const audio = await this.audioService.getAudioFile(groups, context, id);
 
     if (!audio) {
       throw new NotFoundException('Áudio não encontrado');
@@ -74,7 +95,8 @@ export class AudioController {
   @ApiResponse({ status: 200, description: 'Arquivo de áudio para download', content: { 'audio/mpeg': {} } })
   @ApiResponse({ status: 404, description: 'Áudio não encontrado' })
   async downloadAudio(@Param('id') id: string, @Req() req: AuthenticatedRequest, @Res() res: Response) {
-    const audio = await this.audioService.getAudioFile(this.groups(req), this.accessContext(req), id);
+    const { groups, context } = await this.authorize(req);
+    const audio = await this.audioService.getAudioFile(groups, context, id);
 
     if (!audio) {
       throw new NotFoundException('Áudio não encontrado');
@@ -93,8 +115,9 @@ export class AudioController {
   @ApiOperation({ summary: 'Buscar gravação específica', description: 'Retorna metadados de uma gravação específica [DEV: sem autenticação temporariamente]' })
   @ApiParam({ name: 'id', description: 'ID (UUID) da gravação', example: 'a1b2c3d4-...' })
   @ApiResponse({ status: 200, description: 'Metadados da gravação retornados' })
-  findOne(@Param('id') id: string, @Req() req: AuthenticatedRequest) {
-    return this.audioService.findOne(this.groups(req), this.accessContext(req), id);
+  async findOne(@Param('id') id: string, @Req() req: AuthenticatedRequest) {
+    const { groups, context } = await this.authorize(req);
+    return this.audioService.findOne(groups, context, id);
   }
 
   @Post('zip')
@@ -137,8 +160,7 @@ export class AudioController {
       throw new BadRequestException('Selecione no máximo 50 áudios por ZIP');
     }
 
-    const groups = this.groups(req);
-    const context = this.accessContext(req, accessGroup);
+    const { groups, context } = await this.authorize(req, accessGroup);
     const authorized = await this.audioService.findSome(groups, context, uniqueIds);
     if (!authorized.length) {
       throw new NotFoundException('Nenhum áudio autorizado foi encontrado');
@@ -167,8 +189,7 @@ export class AudioController {
   @ApiOperation({ summary: 'Export metadados (CSV)', description: 'Retorna metadados de múltiplas gravações em formato JSON para export CSV [DEV: sem autenticação temporariamente]' })
   @ApiResponse({ status: 200, description: 'Lista de metadados retornada' })
   async downloadCsv(@Body('ids') ids: string[], @Req() req: AuthenticatedRequest) {
-    const groups = this.groups(req);
-    const accessContext = this.accessContext(req);
-    return (await Promise.all(ids.map((id) => this.audioService.findOne(groups, accessContext, id)))).filter(Boolean);
+    const { groups, context } = await this.authorize(req);
+    return (await Promise.all(ids.map((id) => this.audioService.findOne(groups, context, id)))).filter(Boolean);
   }
 }
