@@ -1,12 +1,14 @@
 import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
+import { AuditService } from '../audit/audit.service';
+import { AuditRequest } from '../audit/audit.types';
 
 @Injectable()
 export class JwtAuthGuard implements CanActivate {
-  constructor(private jwtService: JwtService) {}
+  constructor(private jwtService: JwtService, private auditService: AuditService) {}
 
-  canActivate(context: ExecutionContext): boolean {
-    const request = context.switchToHttp().getRequest();
+  async canActivate(context: ExecutionContext): Promise<boolean> {
+    const request = context.switchToHttp().getRequest<AuditRequest>();
     const authHeader = request.headers['authorization'];
 
     // Extrair token do header Authorization ou do query parameter (fallback para <audio> tag)
@@ -24,7 +26,7 @@ export class JwtAuthGuard implements CanActivate {
     }
 
     if (!token) {
-      throw new UnauthorizedException('Token não fornecido');
+      return this.reject(request, 'ACCESS_DENIED', 'TOKEN_NOT_PROVIDED');
     }
 
     try {
@@ -32,7 +34,12 @@ export class JwtAuthGuard implements CanActivate {
       request.user = payload;
       return true;
     } catch {
-      throw new UnauthorizedException('Token inválido ou expirado');
+      return this.reject(request, 'SESSION_EXPIRED', 'TOKEN_INVALID_OR_EXPIRED');
     }
+  }
+
+  private async reject(request: AuditRequest, action: 'ACCESS_DENIED' | 'SESSION_EXPIRED', reason: string): Promise<never> {
+    await this.auditService.record(request, { action, result: 'BLOCKED', details: { reason } });
+    throw new UnauthorizedException(action === 'SESSION_EXPIRED' ? 'Token inválido ou expirado' : 'Acesso não autorizado');
   }
 }

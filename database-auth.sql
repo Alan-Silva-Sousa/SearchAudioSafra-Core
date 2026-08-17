@@ -9,5 +9,8 @@ CREATE TABLE IF NOT EXISTS public.users (
   "lastLogin" TIMESTAMP NOT NULL
 );
 
+ALTER TABLE public.users
+  ADD COLUMN IF NOT EXISTS perfil VARCHAR NOT NULL DEFAULT 'usuario';
+
 CREATE INDEX IF NOT EXISTS idx_users_external_identity
   ON public.users ("externalId", "authProvider");

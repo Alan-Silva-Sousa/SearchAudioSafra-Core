@@ -1,5 +1,4 @@
 import { DataSource } from 'typeorm';
-import { Log } from './logs/entities/log.entity';
 import { User } from './user/entities/user.entity';
 import { Division } from './config/entities/division.entity';
 import {
@@ -17,7 +16,7 @@ export const AppDataSource = new DataSource({
   username: process.env.DB_USERNAME!,
   password: process.env.DB_PASSWORD!,
   schema: process.env.DB_SCHEMA || 'searchaudio',
-  entities: [Log, User, Division, GenesysConversation, GenesysRecording, GenesysConversationUser, GenesysConversationWrapupCode],
+  entities: [User, Division, GenesysConversation, GenesysRecording, GenesysConversationUser, GenesysConversationWrapupCode],
   migrations: ['src/migrations/*.ts'],
   synchronize: false,
   logging: process.env.NODE_ENV === 'development',

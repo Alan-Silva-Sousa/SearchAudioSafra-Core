@@ -61,11 +61,12 @@ export class GenesysStrategy implements IAuthStrategy {
       // Step 1: Exchange authorization code for tokens
       const tokens = await this.exchangeCodeForTokens(code, verifier);
 
-      // Step 2: Get user info from Genesys
+      // Step 2: Get user info + group membership from Genesys
       const genesysUser = await this.getUserInfo(tokens.access_token);
-      const genesysGroupIds = (genesysUser.groups || [])
-        .map((group) => group.id)
-        .filter((id): id is string => Boolean(id));
+      let genesysGroupIds = extractGroupIds(genesysUser.groups);
+      if (!genesysGroupIds.length && genesysUser.id) {
+        genesysGroupIds = await this.getUserGroupIds(tokens.access_token, genesysUser.id);
+      }
 
       // Step 3: Find or create user in local database
       const user = await this.userService.findOrCreateExternalUser({
@@ -74,6 +75,10 @@ export class GenesysStrategy implements IAuthStrategy {
         authProvider: 'genesys',
         displayName: genesysUser.name,
       });
+
+      this.logger.log(
+        `Genesys PKCE login user=${genesysUser.id} groups=${genesysGroupIds.length}`,
+      );
 
       return {
         success: true,
@@ -161,7 +166,31 @@ export class GenesysStrategy implements IAuthStrategy {
     return response.data;
   }
 
+  private async getUserGroupIds(
+    accessToken: string,
+    userId: string,
+  ): Promise<string[]> {
+    const apiUrl = `https://api.${this.region}/api/v2/users/${encodeURIComponent(userId)}/groups`;
+    const response = await axios.get<{
+      entities?: Array<{ id?: string }>;
+    }>(apiUrl, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      params: { pageSize: 100 },
+    });
+
+    return extractGroupIds(response.data.entities);
+  }
+
   getMethodType(): AuthMethodType {
     return 'genesys';
   }
+}
+
+function extractGroupIds(
+  groups?: Array<{ id?: string }> | null,
+): string[] {
+  return [...new Set((groups || []).map((group) => group.id).filter((id): id is string => Boolean(id)))];
 }

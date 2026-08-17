@@ -3,6 +3,11 @@ import { GetObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { Pool } from 'pg';
 import { Readable } from 'stream';
 import * as fs from 'fs';
+import {
+  convertBufferToMp3,
+  mp3FileName,
+  shouldServeAsMp3,
+} from './audio-mp3.util';
 
 interface CanonicalRow {
   recording_id: string;
@@ -50,6 +55,12 @@ export class CanonicalAudioService implements OnModuleDestroy {
   private projection(groupIds: string[], accessContext: string, extraWhere = '', values: unknown[] = []) {
     if (!groupIds.length || !accessContext) return { text: '', values: [] as unknown[] };
     const queryValues: unknown[] = [groupIds, accessContext, this.encryptionKey, ...values];
+    // Isolamento POR GRAVAÇÃO (vale para CPF, skill, telefone e qualquer filtro):
+    // - usuário membro do access group do contexto
+    // - gravação/conversa tem pelo menos uma fila desse access group
+    // - gravação/conversa NÃO tem fila exclusiva de outro access group
+    // Assim um áudio/vídeo com fila PJ_DIGITAL (Grupo A) não aparece no Grupo B
+    // nem por skill, nem por CPF, nem por qualquer outro campo.
     return {
       text: `
         SELECT p.*,
@@ -58,18 +69,39 @@ export class CanonicalAudioService implements OnModuleDestroy {
         FROM searchaudio_recordings p
         WHERE EXISTS (
           SELECT 1
-          FROM conversation_queues cq
-          JOIN access_group_queues agq ON agq.queue_id = cq.queue_id
-          JOIN access_groups ag ON ag.id = agq.access_group_id AND ag.active
-          WHERE cq.conversation_id = p.conversation_id
-            AND ag.genesys_group_id = ANY($1::varchar[])
+          FROM access_groups ag
+          JOIN conversation_queues cq ON cq.conversation_id = p.conversation_id
+          JOIN access_group_queues agq
+            ON agq.queue_id = cq.queue_id
+           AND agq.access_group_id = ag.id
+          WHERE ag.active
             AND ag.slug = $2
+            AND ag.genesys_group_id = ANY($1::varchar[])
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM conversation_queues cq
+          JOIN access_group_queues foreign_agq ON foreign_agq.queue_id = cq.queue_id
+          JOIN access_groups foreign_ag
+            ON foreign_ag.id = foreign_agq.access_group_id
+           AND foreign_ag.active
+           AND foreign_ag.slug <> $2
+          WHERE cq.conversation_id = p.conversation_id
+            AND NOT EXISTS (
+              SELECT 1
+              FROM access_group_queues context_agq
+              JOIN access_groups context_ag
+                ON context_ag.id = context_agq.access_group_id
+               AND context_ag.active
+               AND context_ag.slug = $2
+              WHERE context_agq.queue_id = cq.queue_id
+            )
         ) ${extraWhere}`,
       values: queryValues,
     };
   }
 
-  async findAll(groupIds: string[], accessContext: string, filterTypes: string[], filterValues: string[]) {
+  async findAll(groupIds: string[], accessContext: string, filterTypes: string[], filterValues: string[], filterFields: string[] = []) {
     const clauses: string[] = [];
     const values: unknown[] = [];
     filterTypes.forEach((type, index) => {
@@ -86,7 +118,16 @@ export class CanonicalAudioService implements OnModuleDestroy {
         clauses.push(`COALESCE(NULLIF(BTRIM(p.participant_attributes->>'Telefone Destino'), ''), decrypt_value(p.dnis_normalized, $3)) ILIKE ${parameter}`);
         values.push(`%${value}%`);
       } else if (type === 'Document') {
-        clauses.push(`COALESCE(p.cpf, p.cnpj, '') ILIKE ${parameter}`);
+        clauses.push(`COALESCE(
+          NULLIF(BTRIM(p.cpf), ''),
+          NULLIF(BTRIM(p.cnpj), ''),
+          NULLIF(BTRIM(p.participant_attributes->>'Doc Cliente'), ''),
+          NULLIF(BTRIM(p.participant_attributes->>'doc_cliente'), ''),
+          NULLIF(BTRIM(p.participant_attributes->>'CPF'), ''),
+          NULLIF(BTRIM(p.participant_attributes->>'cnpj'), ''),
+          NULLIF(BTRIM(p.participant_attributes->>'CNPJ'), ''),
+          ''
+        ) ILIKE ${parameter}`);
         values.push(`%${value}%`);
       } else if (type === 'QueueSkill') {
         clauses.push(`COALESCE(NULLIF(BTRIM(p.participant_attributes->>'skill'), ''), NULLIF(BTRIM(p.participant_attributes->>'transfer_filas'), '')) ILIKE ${parameter}`);
@@ -98,8 +139,33 @@ export class CanonicalAudioService implements OnModuleDestroy {
         clauses.push(`CASE WHEN ${parameter} ~ '^\\d+$' THEN FLOOR(COALESCE(p.duration_ms, 0)::numeric / 1000) = ${parameter}::numeric ELSE false END`);
         values.push(value);
       } else if (type === 'Format') {
-        clauses.push(`(COALESCE(p.content_type, '') ILIKE ${parameter} OR p.s3_object_key ILIKE ${parameter})`);
+        // UI entrega MP3 (conversão on-the-fly); no storage pode continuar OGG
+        const needle = String(value).toLowerCase();
+        if (needle.includes('mp3') || needle.includes('mpeg')) {
+          clauses.push(
+            `(COALESCE(p.content_type, '') ILIKE ${parameter} OR p.s3_object_key ILIKE ${parameter} OR COALESCE(p.content_type, '') ILIKE '%ogg%' OR p.s3_object_key ILIKE '%.ogg')`,
+          );
+          values.push(`%${value}%`);
+        } else {
+          clauses.push(
+            `(COALESCE(p.content_type, '') ILIKE ${parameter} OR p.s3_object_key ILIKE ${parameter})`,
+          );
+          values.push(`%${value}%`);
+        }
+      } else if (type === 'FileSize') {
+        const bytes = Number(value);
+        if (Number.isFinite(bytes) && bytes >= 0) {
+          const tolerance = Math.max(1, bytes * 0.001);
+          clauses.push(`COALESCE(p.file_size, 0)::numeric BETWEEN ${parameter}::numeric AND $${values.length + 5}::numeric`);
+          values.push(bytes - tolerance, bytes + tolerance);
+        }
+      } else if (type === 'ParticipantData') {
+        const field = filterFields[index]?.trim();
+        if (!field) return;
+        values.push(field);
+        const valueParameter = `$${values.length + 4}`;
         values.push(`%${value}%`);
+        clauses.push(`COALESCE(p.participant_attributes ->> ${parameter}, '') ILIKE ${valueParameter}`);
       }
     });
     const where = clauses.length ? `AND ${clauses.join(' AND ')}` : '';
@@ -107,6 +173,35 @@ export class CanonicalAudioService implements OnModuleDestroy {
     if (!query.text) return [];
     const result = await this.pool.query<CanonicalRow>(query.text, query.values);
     return result.rows.map((row) => this.toApi(row));
+  }
+
+  async filterFields(groupIds: string[], accessContext: string) {
+    // Catálogo de filtros compartilhado: não depende de gravações do grupo atual.
+    // Grupos sem filas/gravações (ex.: retenção, caça-pos) ficam com o mesmo menu de A/B.
+    // Isolamento de acesso continua só na busca/play/download (projection).
+    if (!groupIds.length || !accessContext) return [];
+    const allowed = await this.pool.query(
+      `SELECT 1
+       FROM access_groups ag
+       WHERE ag.active
+         AND ag.slug = $2
+         AND ag.genesys_group_id = ANY($1::varchar[])
+       LIMIT 1`,
+      [groupIds, accessContext],
+    );
+    if (!allowed.rows.length) return [];
+
+    const result = await this.pool.query<{ field: string }>(
+      `SELECT DISTINCT fields.field
+       FROM searchaudio_recordings p
+       CROSS JOIN LATERAL jsonb_object_keys(
+         COALESCE(p.participant_attributes, '{}'::jsonb)
+       ) fields(field)
+       WHERE p.participant_attributes IS NOT NULL
+         AND p.participant_attributes <> '{}'::jsonb
+       ORDER BY fields.field`,
+    );
+    return result.rows.map(({ field }) => field);
   }
 
   async findOne(groupIds: string[], accessContext: string, recordingId: string) {
@@ -138,31 +233,35 @@ export class CanonicalAudioService implements OnModuleDestroy {
     const response = await this.s3.send(new GetObjectCommand({ Bucket: row.s3_bucket, Key: row.s3_object_key }));
     const chunks: Buffer[] = [];
     for await (const chunk of response.Body as Readable) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-    return {
-      buffer: Buffer.concat(chunks),
-      contentType: row.content_type || response.ContentType || 'application/octet-stream',
-      fileName: row.s3_object_key.split('/').pop() || `${recordingId}.bin`,
-    };
+    let buffer = Buffer.concat(chunks);
+    const rawName = row.s3_object_key.split('/').pop() || `${recordingId}.bin`;
+    let contentType = row.content_type || response.ContentType || 'application/octet-stream';
+    let fileName = rawName;
+
+    // Entrega ao usuário em MP3 (S3 pode continuar em OGG — sem alteração de schema/DB)
+    if (shouldServeAsMp3(contentType, rawName)) {
+      buffer = await convertBufferToMp3(buffer);
+      contentType = 'audio/mpeg';
+      fileName = mp3FileName(rawName, recordingId);
+    }
+
+    return { buffer, contentType, fileName };
   }
 
   async getAudioStream(groupIds: string[], accessContext: string, recordingId: string) {
-    const query = this.projection(groupIds, accessContext, 'AND p.recording_id = $4 LIMIT 1', [recordingId]);
-    if (!query.text) return null;
-    const result = await this.pool.query<CanonicalRow>(query.text, query.values);
-    const row = result.rows[0];
-    if (!row) return null;
-
-    const response = await this.s3.send(
-      new GetObjectCommand({ Bucket: row.s3_bucket, Key: row.s3_object_key }),
-    );
+    const file = await this.getAudioFile(groupIds, accessContext, recordingId);
+    if (!file) return null;
     return {
-      stream: response.Body as Readable,
-      fileName: row.s3_object_key.split('/').pop() || `${recordingId}.bin`,
+      stream: Readable.from(file.buffer),
+      fileName: file.fileName,
+      contentType: file.contentType,
     };
   }
 
   private toApi(row: CanonicalRow) {
-    const extension = row.s3_object_key.split('.').pop()?.toLowerCase() || null;
+    const rawExtension = row.s3_object_key.split('.').pop()?.toLowerCase() || null;
+    const rawName = row.s3_object_key.split('/').pop() || '';
+    const asMp3 = shouldServeAsMp3(row.content_type, rawName);
     return {
       CallIDMaster: row.recording_id,
       IdOrigem: row.conversation_id,
@@ -170,7 +269,7 @@ export class CanonicalAudioService implements OnModuleDestroy {
       DNIS: row.dnis,
       RecordStart: row.conversation_start_time,
       RecordDuration: Math.floor(Number(row.duration_ms || 0) / 1000),
-      DestinationFileName: row.s3_object_key.split('/').pop(),
+      DestinationFileName: asMp3 ? mp3FileName(rawName, row.recording_id) : rawName,
       DestinationFileSize: Number(row.file_size || 0),
       S3Directory: row.s3_bucket,
       S3FileName: row.s3_object_key,
@@ -183,8 +282,8 @@ export class CanonicalAudioService implements OnModuleDestroy {
       Dispositionname: null,
       Direction: row.initial_direction,
       MediaType: 'audio',
-      ContentType: row.content_type,
-      FileExtension: extension,
+      ContentType: asMp3 ? 'audio/mpeg' : row.content_type,
+      FileExtension: asMp3 ? 'mp3' : rawExtension,
       CPF: row.cpf,
       CNPJ: row.cnpj,
       AGENCIA: row.agencia,

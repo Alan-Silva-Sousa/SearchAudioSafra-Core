@@ -58,6 +58,7 @@ export class AuthService {
       email: result.user.email,
       displayName: result.user.displayName,
       authProvider: result.user.authProvider,
+      externalId: result.user.externalId,
     };
 
     return {
@@ -89,6 +90,8 @@ export class AuthService {
       sub: result.user.id,
       email: result.user.email,
       displayName: result.user.displayName,
+      externalId: result.user.externalId,
+      perfil: result.user.perfil,
       authProvider: result.user.authProvider,
       genesysGroupIds: result.genesysGroupIds || [],
     };
@@ -97,6 +100,10 @@ export class AuthService {
       token: this.jwtService.sign(payload),
       email: result.user.email,
       displayName: result.user.displayName,
+      userId: result.user.id,
+      externalId: result.user.externalId,
+      perfil: result.user.perfil,
+      genesysGroupIds: result.genesysGroupIds || [],
     };
   }
 

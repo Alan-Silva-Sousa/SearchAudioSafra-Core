@@ -9,11 +9,10 @@ import { AuthModule } from './user/auth.module';
 import { User } from './user/entities/user.entity';
 import { UpdatePasswordModule } from './update-password/update-password.module';
 import { ThrottlerModule } from '@nestjs/throttler';
-import { LogsModule } from './logs/logs.module';
-import { Log } from './logs/entities/log.entity';
 import { ConfigModule as Configdev } from './config/config.module';
 import { GenesysModule } from './genesys/genesys.module';
 import { Division } from './config/entities/division.entity';
+import { AuditModule } from './audit/audit.module';
 
 @Module({
   imports: [ConfigModule.forRoot({ isGlobal: true, envFilePath: `.env` }),
@@ -27,7 +26,6 @@ import { Division } from './config/entities/division.entity';
     schema: process.env.DB_SCHEMA || 'searchaudio',
     entities: [
       User,
-      Log,
       Division,
       Gravacao,
     ],
@@ -49,9 +47,9 @@ import { Division } from './config/entities/division.entity';
       ttl: 60,
       limit: 10,
     }]),
-    LogsModule,
     Configdev,
-    GenesysModule
+    GenesysModule,
+    AuditModule
   ],
   controllers: [AppController],
   providers: [AppService],

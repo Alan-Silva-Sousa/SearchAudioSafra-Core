@@ -20,6 +20,9 @@ export class User {
   @Column({ nullable: true })
   displayName: string;
 
+  @Column({ default: 'usuario' })
+  perfil: string;
+
   @Column()
   createdAt: Date;
 

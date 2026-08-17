@@ -12,6 +12,7 @@ import {
   GenesysStrategy,
   AuthStrategyFactory,
 } from './strategies';
+import { AccessModule } from '../access/access.module';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import {
       secret: process.env.JWT_SECRET,
       signOptions: { expiresIn: '1d' },
     }),
+    AccessModule,
   ],
   providers: [
     AuthService,
