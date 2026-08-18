@@ -94,32 +94,57 @@ export function appendCanonicalRecordingFilter(
     builder.clauses.push(`p.conversation_start_time::date <= ${parameter}::date`);
     return;
   }
+  if (type === 'RecordStartHourStart') {
+    builder.clauses.push(`(p.conversation_start_time AT TIME ZONE 'America/Sao_Paulo')::time >= ${parameter}::time`);
+    return;
+  }
+  if (type === 'RecordStartHourEnd') {
+    builder.clauses.push(`(p.conversation_start_time AT TIME ZONE 'America/Sao_Paulo')::time <= ${parameter}::time`);
+    return;
+  }
   if (type === 'CustomerPhone') {
-    builder.values[builder.values.length - 1] = `%${value}%`;
+    const digits = String(value).replace(/\D/g, '');
+    if (!digits) {
+      builder.values.pop();
+      builder.parameterIndex -= 1;
+      return;
+    }
+    builder.values[builder.values.length - 1] = `%${digits}%`;
     builder.clauses.push(
-      `COALESCE(NULLIF(BTRIM(p.participant_attributes->>'Telefone Cliente'), ''), NULLIF(BTRIM(p.participant_attributes->>'telefone'), ''), decrypt_value(p.ani_normalized, $3)) ILIKE ${parameter}`,
+      `regexp_replace(COALESCE(NULLIF(BTRIM(p.participant_attributes->>'Telefone Cliente'), ''), NULLIF(BTRIM(p.participant_attributes->>'telefone'), ''), decrypt_value(p.ani_normalized, $3), ''), '[^0-9]', '', 'g') LIKE ${parameter}`,
     );
     return;
   }
   if (type === 'DestinationPhone') {
-    builder.values[builder.values.length - 1] = `%${value}%`;
+    const digits = String(value).replace(/\D/g, '');
+    if (!digits) {
+      builder.values.pop();
+      builder.parameterIndex -= 1;
+      return;
+    }
+    builder.values[builder.values.length - 1] = `%${digits}%`;
     builder.clauses.push(
-      `COALESCE(NULLIF(BTRIM(p.participant_attributes->>'Telefone Destino'), ''), decrypt_value(p.dnis_normalized, $3)) ILIKE ${parameter}`,
+      `regexp_replace(COALESCE(NULLIF(BTRIM(p.participant_attributes->>'Telefone Destino'), ''), decrypt_value(p.dnis_normalized, $3), ''), '[^0-9]', '', 'g') LIKE ${parameter}`,
     );
     return;
   }
   if (type === 'Document') {
-    builder.values[builder.values.length - 1] = `%${value}%`;
-    builder.clauses.push(`COALESCE(
-      NULLIF(BTRIM(p.cpf), ''),
-      NULLIF(BTRIM(p.cnpj), ''),
-      NULLIF(BTRIM(p.participant_attributes->>'Doc Cliente'), ''),
-      NULLIF(BTRIM(p.participant_attributes->>'doc_cliente'), ''),
-      NULLIF(BTRIM(p.participant_attributes->>'CPF'), ''),
-      NULLIF(BTRIM(p.participant_attributes->>'cnpj'), ''),
-      NULLIF(BTRIM(p.participant_attributes->>'CNPJ'), ''),
-      ''
-    ) ILIKE ${parameter}`);
+    const digits = String(value).replace(/\D/g, '');
+    if (!digits) {
+      builder.values.pop();
+      builder.parameterIndex -= 1;
+      return;
+    }
+    builder.values[builder.values.length - 1] = `%${digits}%`;
+    builder.clauses.push(`(
+      regexp_replace(COALESCE(p.cpf, ''), '[^0-9]', '', 'g') LIKE ${parameter}
+      OR regexp_replace(COALESCE(p.cnpj, ''), '[^0-9]', '', 'g') LIKE ${parameter}
+      OR regexp_replace(COALESCE(p.participant_attributes->>'Doc Cliente', ''), '[^0-9]', '', 'g') LIKE ${parameter}
+      OR regexp_replace(COALESCE(p.participant_attributes->>'doc_cliente', ''), '[^0-9]', '', 'g') LIKE ${parameter}
+      OR regexp_replace(COALESCE(p.participant_attributes->>'CPF', ''), '[^0-9]', '', 'g') LIKE ${parameter}
+      OR regexp_replace(COALESCE(p.participant_attributes->>'cnpj', ''), '[^0-9]', '', 'g') LIKE ${parameter}
+      OR regexp_replace(COALESCE(p.participant_attributes->>'CNPJ', ''), '[^0-9]', '', 'g') LIKE ${parameter}
+    )`);
     return;
   }
   if (type === 'QueueSkill') {
