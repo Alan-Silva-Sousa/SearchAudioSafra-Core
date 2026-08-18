@@ -2,6 +2,7 @@ import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { Pool } from 'pg';
 import { AUDIT_ACTIONS, AuditQuery, AuditRequest, RecordAuditEvent } from './audit.types';
+import { normalizeAuditEndDate, normalizeAuditStartDate } from '../audio/canonical-recording-filters';
 
 @Injectable()
 export class AuditService implements OnModuleDestroy {
@@ -44,8 +45,8 @@ export class AuditService implements OnModuleDestroy {
     const values: unknown[] = [];
     const where: string[] = [];
     const add = (sql: string, value: unknown) => { values.push(value); where.push(sql.replace('?', `$${values.length}`)); };
-    if (query.start) add('occurred_at >= ?::timestamptz', query.start);
-    if (query.end) add('occurred_at <= ?::timestamptz', query.end);
+    if (query.start) add('occurred_at >= ?::timestamptz', normalizeAuditStartDate(query.start));
+    if (query.end) add('occurred_at <= ?::timestamptz', normalizeAuditEndDate(query.end));
     if (query.user) add('user_login ILIKE ?', `%${query.user}%`);
     if (query.action && AUDIT_ACTIONS.includes(query.action as never)) add('action = ?', query.action);
     if (query.result) add('result = ?', query.result);

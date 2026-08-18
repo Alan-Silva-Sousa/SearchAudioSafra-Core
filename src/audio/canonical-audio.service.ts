@@ -8,6 +8,7 @@ import {
   mp3FileName,
   shouldServeAsMp3,
 } from './audio-mp3.util';
+import { buildCanonicalRecordingClauses } from './canonical-recording-filters';
 
 interface CanonicalRow {
   recording_id: string;
@@ -104,72 +105,7 @@ export class CanonicalAudioService implements OnModuleDestroy {
   }
 
   async findAll(groupIds: string[], accessContext: string, filterTypes: string[], filterValues: string[], filterFields: string[] = []) {
-    const clauses: string[] = [];
-    const values: unknown[] = [];
-    filterTypes.forEach((type, index) => {
-      const value = filterValues[index];
-      if (!type || !value) return;
-      const parameter = `$${values.length + 4}`;
-      if (type === 'RecordStart') {
-        clauses.push(`p.conversation_start_time::date = ${parameter}::date`);
-        values.push(value);
-      } else if (type === 'CustomerPhone') {
-        clauses.push(`COALESCE(NULLIF(BTRIM(p.participant_attributes->>'Telefone Cliente'), ''), NULLIF(BTRIM(p.participant_attributes->>'telefone'), ''), decrypt_value(p.ani_normalized, $3)) ILIKE ${parameter}`);
-        values.push(`%${value}%`);
-      } else if (type === 'DestinationPhone') {
-        clauses.push(`COALESCE(NULLIF(BTRIM(p.participant_attributes->>'Telefone Destino'), ''), decrypt_value(p.dnis_normalized, $3)) ILIKE ${parameter}`);
-        values.push(`%${value}%`);
-      } else if (type === 'Document') {
-        clauses.push(`COALESCE(
-          NULLIF(BTRIM(p.cpf), ''),
-          NULLIF(BTRIM(p.cnpj), ''),
-          NULLIF(BTRIM(p.participant_attributes->>'Doc Cliente'), ''),
-          NULLIF(BTRIM(p.participant_attributes->>'doc_cliente'), ''),
-          NULLIF(BTRIM(p.participant_attributes->>'CPF'), ''),
-          NULLIF(BTRIM(p.participant_attributes->>'cnpj'), ''),
-          NULLIF(BTRIM(p.participant_attributes->>'CNPJ'), ''),
-          ''
-        ) ILIKE ${parameter}`);
-        values.push(`%${value}%`);
-      } else if (type === 'QueueSkill') {
-        clauses.push(`COALESCE(NULLIF(BTRIM(p.participant_attributes->>'skill'), ''), NULLIF(BTRIM(p.participant_attributes->>'transfer_filas'), '')) ILIKE ${parameter}`);
-        values.push(`%${value}%`);
-      } else if (type === 'Environment') {
-        clauses.push(`COALESCE(p.participant_attributes->>'Ambiente', '') ILIKE ${parameter}`);
-        values.push(`%${value}%`);
-      } else if (type === 'Duration') {
-        clauses.push(`CASE WHEN ${parameter} ~ '^\\d+$' THEN FLOOR(COALESCE(p.duration_ms, 0)::numeric / 1000) = ${parameter}::numeric ELSE false END`);
-        values.push(value);
-      } else if (type === 'Format') {
-        // UI entrega MP3 (conversão on-the-fly); no storage pode continuar OGG
-        const needle = String(value).toLowerCase();
-        if (needle.includes('mp3') || needle.includes('mpeg')) {
-          clauses.push(
-            `(COALESCE(p.content_type, '') ILIKE ${parameter} OR p.s3_object_key ILIKE ${parameter} OR COALESCE(p.content_type, '') ILIKE '%ogg%' OR p.s3_object_key ILIKE '%.ogg')`,
-          );
-          values.push(`%${value}%`);
-        } else {
-          clauses.push(
-            `(COALESCE(p.content_type, '') ILIKE ${parameter} OR p.s3_object_key ILIKE ${parameter})`,
-          );
-          values.push(`%${value}%`);
-        }
-      } else if (type === 'FileSize') {
-        const bytes = Number(value);
-        if (Number.isFinite(bytes) && bytes >= 0) {
-          const tolerance = Math.max(1, bytes * 0.001);
-          clauses.push(`COALESCE(p.file_size, 0)::numeric BETWEEN ${parameter}::numeric AND $${values.length + 5}::numeric`);
-          values.push(bytes - tolerance, bytes + tolerance);
-        }
-      } else if (type === 'ParticipantData') {
-        const field = filterFields[index]?.trim();
-        if (!field) return;
-        values.push(field);
-        const valueParameter = `$${values.length + 4}`;
-        values.push(`%${value}%`);
-        clauses.push(`COALESCE(p.participant_attributes ->> ${parameter}, '') ILIKE ${valueParameter}`);
-      }
-    });
+    const { clauses, values } = buildCanonicalRecordingClauses(filterTypes, filterValues, filterFields);
     const where = clauses.length ? `AND ${clauses.join(' AND ')}` : '';
     const query = this.projection(groupIds, accessContext, `${where} ORDER BY p.conversation_start_time DESC LIMIT 500`, values);
     if (!query.text) return [];
