@@ -8,6 +8,7 @@ import { Pool } from 'pg';
 export interface AccessGroupInfo {
   genesysGroupId: string;
   slug: string;
+  canonicalSlug: string;
   name: string;
   /** Trecho após o "_" no nome do grupo Genesys/app, ex.: SearchAudio_GrupoA → GrupoA */
   divisionLabel: string;
@@ -16,6 +17,7 @@ export interface AccessGroupInfo {
 
 @Injectable()
 export class AccessGroupService implements OnModuleDestroy {
+  private readonly mediaKind = 'audio';
   private readonly pool = new Pool({
     host: process.env.INGESTION_DB_HOST || 'ingestion-postgres',
     port: Number(process.env.INGESTION_DB_PORT || 5432),
@@ -48,7 +50,7 @@ export class AccessGroupService implements OnModuleDestroy {
     }>(
       `
         SELECT
-          ag.genesys_group_id,
+          agg.genesys_group_id,
           ag.slug,
           ag.name,
           COALESCE(
@@ -60,17 +62,19 @@ export class AccessGroupService implements OnModuleDestroy {
         LEFT JOIN access_group_divisions agd ON agd.access_group_id = ag.id
         WHERE ag.active
           AND agg.genesys_group_id = ANY($1::varchar[])
+          AND agg.media_kind = $2
           AND ag.slug IS NOT NULL
           AND BTRIM(ag.slug) <> ''
-        GROUP BY ag.id, ag.genesys_group_id, ag.slug, ag.name
+        GROUP BY ag.id, agg.genesys_group_id, ag.slug, ag.name
         ORDER BY ag.slug
       `,
-      [groupIds],
+      [groupIds, this.mediaKind],
     );
 
     return result.rows.map((row) => ({
       genesysGroupId: row.genesys_group_id,
-      slug: row.slug,
+      slug: `${this.mediaKind}-${row.slug}`,
+      canonicalSlug: row.slug,
       name: row.name,
       divisionLabel: divisionLabelFromGroupName(row.name),
       divisionIds: row.division_ids || [],
@@ -82,12 +86,18 @@ export class AccessGroupService implements OnModuleDestroy {
     accessContext: string,
   ): Promise<AccessGroupInfo> {
     const groups = await this.findAuthorizedGroups(genesysGroupIds);
-    const match = groups.find((group) => group.slug === accessContext);
+    const requested = mediaScopedSlug(accessContext, this.mediaKind);
+    const match = groups.find((group) => group.slug === requested);
     if (!match) {
       throw new ForbiddenException('Contexto de acesso não autorizado');
     }
     return match;
   }
+}
+
+export function mediaScopedSlug(slug: string, mediaKind: 'audio' | 'video'): string {
+  if (/^(audio|video)-/.test(slug)) return slug;
+  return `${mediaKind}-${slug}`;
 }
 
 export function divisionLabelFromGroupName(name: string): string {

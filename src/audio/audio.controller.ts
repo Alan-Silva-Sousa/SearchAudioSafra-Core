@@ -39,8 +39,8 @@ export class AudioController {
   private async authorize(req: AuthenticatedRequest, queryValue = '') {
     const groups = this.groups(req);
     const context = this.accessContext(req, queryValue);
-    await this.accessGroups.assertAuthorized(groups, context);
-    return { groups, context };
+    const authorized = await this.accessGroups.assertAuthorized(groups, context);
+    return { groups, context: authorized.canonicalSlug };
   }
 
   @Get()

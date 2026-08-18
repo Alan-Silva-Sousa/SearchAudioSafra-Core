@@ -78,6 +78,7 @@ export class CanonicalAudioService implements OnModuleDestroy {
           WHERE ag.active
             AND ag.slug = $2
             AND agg.genesys_group_id = ANY($1::varchar[])
+            AND agg.media_kind = 'audio'
         )
         AND NOT EXISTS (
           SELECT 1
@@ -188,6 +189,7 @@ export class CanonicalAudioService implements OnModuleDestroy {
        WHERE ag.active
          AND ag.slug = $2
          AND agg.genesys_group_id = ANY($1::varchar[])
+         AND agg.media_kind = 'audio'
        LIMIT 1`,
       [groupIds, accessContext],
     );
