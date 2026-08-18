@@ -2,6 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { AudioController } from './audio.controller';
 import { CanonicalAudioService } from './canonical-audio.service';
 import { AccessGroupService } from '../access/access-group.service';
+import { ActionPermissionService } from '../access/action-permission.service';
 import { JwtAuthGuard } from '../user/jwt-auth.guard';
 
 describe('AudioController', () => {
@@ -13,6 +14,7 @@ describe('AudioController', () => {
       providers: [
         { provide: CanonicalAudioService, useValue: {} },
         { provide: AccessGroupService, useValue: {} },
+        { provide: ActionPermissionService, useValue: {} },
       ],
     })
       .overrideGuard(JwtAuthGuard)

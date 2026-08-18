@@ -5,6 +5,7 @@ import { ApiTags, ApiOperation, ApiResponse, ApiQuery, ApiParam } from '@nestjs/
 import { CanonicalAudioService } from './canonical-audio.service';
 import { JwtAuthGuard } from '../user/jwt-auth.guard';
 import { AccessGroupService } from '../access/access-group.service';
+import { ActionPermissionService } from '../access/action-permission.service';
 import { Audited } from '../audit/audited.decorator';
 
 interface AuthenticatedRequest extends Request {
@@ -18,6 +19,7 @@ export class AudioController {
   constructor(
     private readonly audioService: CanonicalAudioService,
     private readonly accessGroups: AccessGroupService,
+    private readonly permissions: ActionPermissionService,
   ) { }
 
   private groups(req: AuthenticatedRequest): string[] {
@@ -99,6 +101,7 @@ export class AudioController {
   @ApiResponse({ status: 200, description: 'Arquivo de áudio para download', content: { 'audio/mpeg': {} } })
   @ApiResponse({ status: 404, description: 'Áudio não encontrado' })
   async downloadAudio(@Param('id') id: string, @Req() req: AuthenticatedRequest, @Res() res: Response) {
+    this.permissions.assertCanDownload(this.groups(req));
     const { groups, context } = await this.authorize(req);
     const audio = await this.audioService.getAudioFile(groups, context, id);
 
@@ -135,6 +138,7 @@ export class AudioController {
     @Req() req: AuthenticatedRequest,
     @Res() res: Response,
   ) {
+    this.permissions.assertCanDownload(this.groups(req));
     return this.streamZip(ids, req, res);
   }
 
@@ -146,6 +150,7 @@ export class AudioController {
     @Req() req: AuthenticatedRequest,
     @Res() res: Response,
   ) {
+    this.permissions.assertCanDownload(this.groups(req));
     return this.streamZip(Array.isArray(id) ? id : [id], req, res, accessGroup);
   }
 
@@ -197,6 +202,7 @@ export class AudioController {
   @ApiOperation({ summary: 'Export metadados (CSV)', description: 'Retorna metadados de múltiplas gravações em formato JSON para export CSV [DEV: sem autenticação temporariamente]' })
   @ApiResponse({ status: 200, description: 'Lista de metadados retornada' })
   async downloadCsv(@Body('ids') ids: string[], @Req() req: AuthenticatedRequest) {
+    this.permissions.assertCanDownload(this.groups(req));
     const { groups, context } = await this.authorize(req);
     return (await Promise.all(ids.map((id) => this.audioService.findOne(groups, context, id)))).filter(Boolean);
   }

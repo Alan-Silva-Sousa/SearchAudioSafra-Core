@@ -70,13 +70,14 @@ export class CanonicalAudioService implements OnModuleDestroy {
         WHERE EXISTS (
           SELECT 1
           FROM access_groups ag
+          JOIN access_group_genesys_groups agg ON agg.access_group_id = ag.id
           JOIN conversation_queues cq ON cq.conversation_id = p.conversation_id
           JOIN access_group_queues agq
             ON agq.queue_id = cq.queue_id
            AND agq.access_group_id = ag.id
           WHERE ag.active
             AND ag.slug = $2
-            AND ag.genesys_group_id = ANY($1::varchar[])
+            AND agg.genesys_group_id = ANY($1::varchar[])
         )
         AND NOT EXISTS (
           SELECT 1
@@ -183,9 +184,10 @@ export class CanonicalAudioService implements OnModuleDestroy {
     const allowed = await this.pool.query(
       `SELECT 1
        FROM access_groups ag
+       JOIN access_group_genesys_groups agg ON agg.access_group_id = ag.id
        WHERE ag.active
          AND ag.slug = $2
-         AND ag.genesys_group_id = ANY($1::varchar[])
+         AND agg.genesys_group_id = ANY($1::varchar[])
        LIMIT 1`,
       [groupIds, accessContext],
     );

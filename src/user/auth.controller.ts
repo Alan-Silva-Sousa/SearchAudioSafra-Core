@@ -5,6 +5,7 @@ import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import { JwtAuthGuard } from './jwt-auth.guard';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiBody, ApiQuery } from '@nestjs/swagger';
 import { AccessGroupService } from '../access/access-group.service';
+import { ActionPermissionService } from '../access/action-permission.service';
 import { AuditService } from '../audit/audit.service';
 import { AuditRequest } from '../audit/audit.types';
 
@@ -13,6 +14,7 @@ export class AuthController {
   constructor(
     private authService: AuthService,
     private accessGroupService: AccessGroupService,
+    private actionPermissions: ActionPermissionService,
     private auditService: AuditService,
   ) {}
 
@@ -59,7 +61,7 @@ export class AuthController {
           genesysGroupIds: result.genesysGroupIds,
         },
       });
-      const frontUrl = process.env.FRONT_URL || 'http://localhost:5173';
+      const frontUrl = (process.env.FRONT_URL || 'http://localhost:5173').replace(/\/$/, '');
       res.cookie('searchaudio_token', result.token, {
         httpOnly: true,
         secure: true,
@@ -67,15 +69,23 @@ export class AuthController {
         path: '/',
         maxAge: 24 * 60 * 60 * 1000,
       });
-      res.redirect(`${frontUrl}/`);
+      const fragment = new URLSearchParams({
+        token: result.token,
+        email: result.email,
+        displayName: result.displayName || '',
+      });
+      res.redirect(`${frontUrl}/#/auth/callback?${fragment.toString()}`);
     } catch (error) {
       await this.auditService.record(req, {
         action: 'LOGIN_FAILURE',
         result: 'FAILURE',
         details: { reason: 'GENESYS_OAUTH_FAILED' },
       });
-      const frontUrl = process.env.FRONT_URL || 'http://localhost:5173';
-      res.redirect(`${frontUrl}/login?error=${encodeURIComponent(error.message || 'Erro de autenticação')}`);
+      const frontUrl = (process.env.FRONT_URL || 'http://localhost:5173').replace(/\/$/, '');
+      const fragment = new URLSearchParams({
+        error: error.message || 'Erro de autenticação',
+      });
+      res.redirect(`${frontUrl}/#/auth/callback?${fragment.toString()}`);
     }
   }
 
@@ -107,7 +117,16 @@ export class AuthController {
       req.user?.genesysGroupIds || [],
     );
 
-    return { authenticated: true, user: req.user, accessGroups };
+    const groupIds = req.user?.genesysGroupIds || [];
+    return {
+      authenticated: true,
+      user: req.user,
+      accessGroups,
+      permissions: {
+        canDownload: this.actionPermissions.canDownload(groupIds),
+        canReadAudit: this.actionPermissions.canReadAudit(groupIds),
+      },
+    };
   }
 
   @UseGuards(JwtAuthGuard)

@@ -56,9 +56,10 @@ export class AccessGroupService implements OnModuleDestroy {
             '{}'::varchar[]
           ) AS division_ids
         FROM access_groups ag
+        JOIN access_group_genesys_groups agg ON agg.access_group_id = ag.id
         LEFT JOIN access_group_divisions agd ON agd.access_group_id = ag.id
         WHERE ag.active
-          AND ag.genesys_group_id = ANY($1::varchar[])
+          AND agg.genesys_group_id = ANY($1::varchar[])
           AND ag.slug IS NOT NULL
           AND BTRIM(ag.slug) <> ''
         GROUP BY ag.id, ag.genesys_group_id, ag.slug, ag.name

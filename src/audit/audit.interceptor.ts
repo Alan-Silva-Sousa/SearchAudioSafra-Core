@@ -28,10 +28,14 @@ export class AuditInterceptor implements NestInterceptor {
       catchError((error) => {
         const status = typeof error?.getStatus === 'function' ? error.getStatus() : 500;
         void this.audit.record(request, {
-          action: status === 403 && options.action !== 'LOGIN_FAILURE' ? 'UNAUTHORIZED_RECORDING_ACCESS' : options.action,
+          action: blockedAction(status, options.action),
           result: status === 401 || status === 403 ? 'BLOCKED' : 'FAILURE',
           accessGroup: accessGroup(request), recordingId: request.params?.id,
-          mediaKind: options.mediaKind, details: { status, durationMs: Date.now() - startedAt },
+          mediaKind: options.mediaKind, details: {
+            status,
+            durationMs: Date.now() - startedAt,
+            reason: downloadAction(options.action) ? 'DOWNLOAD_PERMISSION_REQUIRED' : undefined,
+          },
         }).catch((auditError) => this.logger.error(`Falha ao persistir auditoria: ${auditError.message}`));
         return throwError(() => error);
       }),
@@ -55,4 +59,13 @@ function safeDetails(request: AuditRequest, value: unknown, durationMs: number) 
 function arrayOfStrings(value: unknown): string[] {
   if (Array.isArray(value)) return value.filter((item): item is string => typeof item === 'string');
   return typeof value === 'string' && value ? [value] : [];
+}
+
+function downloadAction(action: string): boolean {
+  return action === 'MEDIA_DOWNLOAD' || action === 'ZIP_DOWNLOAD';
+}
+
+function blockedAction(status: number, action: AuditedOptions['action']): AuditedOptions['action'] {
+  if (status !== 403 || downloadAction(action)) return action;
+  return action === 'LOGIN_FAILURE' ? action : 'UNAUTHORIZED_RECORDING_ACCESS';
 }
